@@ -135,6 +135,16 @@ void LcdInit()
 
 }
 
+void LcdCreateChar(uint8_t location, uint8_t charmap[])
+{
+    location &= 0x7; // Only 8 locations (0-7)
+    LcdWriteCmd(0x40 | (location << 3)); // Set CGRAM address
+
+    for (int i = 0; i < 8; i++)
+        LcdWriteData(charmap[i]);
+}
+
+
 void LcdPortPinConvert(unsigned short data)
 {
 	unsigned short sIndex;
