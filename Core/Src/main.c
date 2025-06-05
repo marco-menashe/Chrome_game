@@ -68,6 +68,7 @@
 #define FULL_IDX		0
 #define BOT_HALF_IDX	1
 #define TOP_HALF_IDX	2
+static int lives = 2;
 
 #define GAME_END		0x01
 
@@ -287,6 +288,7 @@ int main(void) {
 	HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_SET);
     MX_TIM2_Init();
     MX_SPI1_Init();
     MX_TIM5_Init();
@@ -372,11 +374,35 @@ int main(void) {
         	// check for game end
         	if(character.row0Occupied && envCells[0].environmentOccupied)
         	{
-        		flags |= GAME_END;
-        		continue;
+                // lose one life
+                lives--;
+                if (lives == 1) {
+                    // first death -> turn OFF the second LED (PA3)
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+                }
+                else if (lives <= 0) {
+                    // no more lives -> game over
+                    flags |= GAME_END;
+                }
+                // clear that obstacle so we do not immediately collide again
+                envCells[0].environmentOccupied = false;
+                envCells[0].state = ' ';
+                continue;
         	} else if (character.row1Occupied && envCells[ROWLENGTH].environmentOccupied) {
-        		flags |= GAME_END;
-        		continue;
+                // lose one life
+                lives--;
+                if (lives == 1) {
+                    // first death -> turn OFF the second LED (PA3)
+                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+                }
+                else if (lives <= 0) {
+                    // no more lives -> game over
+                    flags |= GAME_END;
+                }
+                // clear that obstacle so we do not immediately collide again
+                envCells[ROWLENGTH].environmentOccupied = false;
+                envCells[ROWLENGTH].state = ' ';
+                continue;
         	}
 
         	// game hasn't ended so we update player on screen
