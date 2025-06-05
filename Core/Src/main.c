@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -51,6 +52,13 @@
 #define Key9Pushed 0x0100
 #define Key0Pushed 0x0201
 
+#define CS GPIO_PIN_6
+#define EEPROM_START 0x01
+#define EEPROM_EWEN 0x3F
+#define EEPROM_WRITE 0x40
+#define EEPROM_EWDS 0x0F
+#define EEPROM_READ 0x80
+
 #define NUMCELLS 		32
 #define ROWLENGTH 		16
 #define JUMPFRAMES 		5
@@ -64,6 +72,10 @@
 #define GAME_END		0x01
 
 unsigned short flags = 0x00;
+uint8_t EE_Data[3];
+
+
+
 
 typedef struct {
     unsigned short sKeyRead;
@@ -196,7 +208,7 @@ character_struct_t character = {
 
 
 // arrays for custom LCD characters:
-uint8_t top_half[8] = {
+uint8_t bottom_half[8] = {
 	0b11111,
 	0b11111,
 	0b00000,
@@ -207,7 +219,7 @@ uint8_t top_half[8] = {
 	0b00000
 };
 
-uint8_t bottom_half[8] = {
+uint8_t top_half[8] = {
 	0b00000,
 	0b00000,
 	0b00000,
@@ -241,21 +253,26 @@ unsigned short sKeyLow2HighCol[Number_of_Cols];
 char Txt[1];
 
 
-uint8_t hour = 2;
-uint8_t minute = 4;
-uint8_t second = 35;
-uint8_t isPM = 1;
-uint32_t lastTick = 0;
 
 
 TIM_HandleTypeDef htim2;
+SPI_HandleTypeDef hspi1;
+TIM_HandleTypeDef htim5;
+
 void print_time(void);
 void Keypadscan(void);
 void KeyProcess(void);
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_TIM5_Init(void);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) { TIMER2_HANDLE(); }
+
+void Delay_1_plus_us(void);
+char *EEPROM_READ_PASS(unsigned short);
+void EEPROM_SEND(char EE_Addr, char EE_Data1, char EE_Data2);
+void EEPROM_READ_FUN(uint8_t EE_Addr);
 
 void updateCellsEnv(void);
 void updatePlayerPos(void);
@@ -263,13 +280,32 @@ void updatePlayerPos(void);
 
 
 int main(void) {
-	unsigned short sIndex;
+
+
+
 
 	HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
     MX_TIM2_Init();
-    HAL_TIM_Base_Start_IT(&htim2);  // Start timer 2 interrupt
+    MX_SPI1_Init();
+    MX_TIM5_Init();
+
+
+	HAL_TIM_Base_Start_IT(&htim2);
+	HAL_TIM_Base_Start(&htim5);
+
+	char highScoreString[4];
+	strncpy(highScoreString, EEPROM_READ_PASS(0x0C), sizeof(highScoreString) - 1);
+	highScoreString[3] = '\0';  // Ensure null termination
+
+	int highScore = atoi(highScoreString);
+//	uint32_t highScore = 0;
+	int currentScore = 0;
+
+
+	unsigned short sIndex;
+
 
     // Clear all debounced records, Previous, Low2High
     for (sIndex = 0; sIndex < Number_of_Cols; sIndex++) {
@@ -289,6 +325,9 @@ int main(void) {
     char bottombuff[17] = "";
 
     char endMessage[17] = "--- Game Over --";
+    char endScore[17];
+
+    if (highScore < 0 || highScore > 99999) highScore = 0;
 
     while (1) {
     	// check for game end condition
@@ -296,6 +335,17 @@ int main(void) {
     		LcdClear();
     		LcdGoto(0, 0);
     		LcdPutS(endMessage);
+    		LcdGoto(1, 0);
+			LcdPutS(endScore);
+			snprintf(endScore, sizeof(endScore), "H: %d C: %d", highScore, currentScore);
+    		if(highScore < currentScore){
+    			char currentScoreString[4];
+    			sprintf(currentScoreString, "%d", currentScore);
+				EEPROM_SEND(0x0C,currentScoreString[0],currentScoreString[1]);					// Address at 0x0C is randomly chosen.
+				EEPROM_SEND(0x0E,currentScoreString[2],currentScoreString[3]);
+				EEPROM_SEND(0x010,currentScoreString[4],currentScoreString[5]);
+				EEPROM_SEND(0x012,'\0','\0');
+    		}
     		return 0;
     	}
 
@@ -304,6 +354,11 @@ int main(void) {
             Keypadscan();
             KeyProcess();
             sTimer[KEY_SCAN_TIMER] = KEY_SCAN_TIME;
+        }
+
+        if ((sTimer[SCORE_TIMER] == 0)){
+        	currentScore++;
+        	sTimer[SCORE_TIMER] = SCORE_TIME;
         }
 
         // frame logic goes here
@@ -433,6 +488,107 @@ void updatePlayerPos() {
 
 	}
 }
+
+char *EEPROM_READ_PASS(unsigned short addr)
+{
+	char temp[20];
+	static char xyz[20];
+
+	uint8_t i;
+
+	// Read two bytes. Check separately until null is found
+	for (i=0; i<10; i++)
+	{
+	  EEPROM_READ_FUN(addr + (2 * i));		// read two bytes
+
+	  if (EE_Data[0] != '\0')
+		temp[2*i] = EE_Data[0];
+	  else
+	  {
+		temp[2*i] = '\0';
+		break;
+	  }
+
+	  if (EE_Data[1] != '\0')
+	  	temp[2*i+1] = EE_Data[1];
+	  else
+	  {
+	    temp[2*i+1] = '\0';
+	  	break;
+	  }
+	}
+
+	strcpy(xyz,temp);
+	return xyz;
+}
+
+void EEPROM_READ_FUN(uint8_t EE_Addr)
+{
+    uint8_t buf[2];
+
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
+    buf[0] = EEPROM_START;
+    buf[1] = (EEPROM_READ | (EE_Addr & 0x3F));
+    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
+
+    HAL_SPI_Receive(&hspi1, EE_Data, 3, 100);
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);           // Chip Select disable
+    Delay_1_plus_us();
+
+    EE_Data[0] <<= 1;
+    if (EE_Data[1] & 0x80)
+    	EE_Data[0] |= 0x01;
+
+    EE_Data[1] <<= 1;
+        if (EE_Data[2] & 0x80)
+        EE_Data[1] |= 0x01;
+}
+
+
+void EEPROM_SEND(char EE_Addr, char EE_Data1, char EE_Data2)
+{
+    uint8_t buf[4];
+
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
+    buf[0] = EEPROM_START;
+    buf[1] = EEPROM_EWEN; //EEPROM_EWEN;
+    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);       // Chip Select disable
+
+    Delay_1_plus_us();
+
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
+    buf[0] = EEPROM_START;
+    buf[1] = (0x40 | (EE_Addr & 0x03F));        // WRITE command OR with 6-bit address
+    buf[2] = EE_Data1;
+    buf[3] = EE_Data2;
+    HAL_SPI_Transmit(&hspi1, buf, 4, 100);
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);       // Chip Select disable
+
+    HAL_Delay(20);
+
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
+    buf[0] = EEPROM_START;
+    buf[1] = EEPROM_EWDS;
+    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
+    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);           // Chip Select disable
+
+    Delay_1_plus_us();
+
+}
+
+
+void Delay_1_plus_us()
+{
+    uint32_t time5now = htim5.Instance->CNT;
+    while (htim5.Instance->CNT == time5now)
+        ; ;
+    time5now = htim5.Instance->CNT;
+
+    while (htim5.Instance->CNT == time5now)
+        ; ;
+}
+
 
 
 void updateCellsEnv() {
@@ -670,22 +826,22 @@ void KeyProcess() {
 
 
 void key1() {
-	hour++;
+
 }
 void key2() {
-	minute++;
+
 }
 void key3() {
-	second++;
+
 }
 void key4() {
-	hour++;
+
 }
 void key5() {
-	minute++;
+
 }
 void key6() {
-	second++;
+
 
 }
 void key7() {
@@ -716,22 +872,16 @@ void keyP() {
 
 
 void key1R() {
-	hour++;
 }
 void key2R() {
-	minute++;
 }
 void key3R() {
-	second++;
 }
 void key4R() {
-	hour++;
 }
 void key5R() {
-	minute++;
 }
 void key6R() {
-	second++;
 }
 void key7R() {
 
@@ -760,6 +910,8 @@ void keyPR() {
   * @brief System Clock Configuration
   * @retval None
   */
+
+
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -803,6 +955,46 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
 }
 
 /**
@@ -851,6 +1043,51 @@ static void MX_TIM2_Init(void)
 }
 
 /**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 79;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 4294967295;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV2;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -868,11 +1105,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
-                          |GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
+                          |GPIO_PIN_4|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
+                          |GPIO_PIN_6|GPIO_PIN_8, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PC0 PC1 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
@@ -880,10 +1118,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA0 PA1 PA4 PA8
-                           PA9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
-                          |GPIO_PIN_9;
+  /*Configure GPIO pins : PA0 PA1 PA2 PA3
+                           PA4 PA8 PA9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
+                          |GPIO_PIN_4|GPIO_PIN_8|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -895,8 +1133,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB10 PB3 PB4 PB5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5;
+  /*Configure GPIO pins : PB10 PB3 PB4 PB5
+                           PB6 PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
+                          |GPIO_PIN_6|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
