@@ -70,17 +70,16 @@
 static int lives = 2;
 
 //I2C
-#define IODIRA 0x00    // MCP23008 - I/O Direction Register
+#define IODIRA 0x00
 #define IODIRB 0x01
-#define MCP_GPIOA 0x12 // MCP23008 - GPIO Register (to set output values)
+#define MCP_GPIOA 0x12
 #define MCP_GPIOB 0x13
 
 char I2C_ADDRESS = 0x40;
 
-// Define life LED positions as bit masks, not just positions
-#define LIFE1	0x01  // 2^0 = 1 (first bit)
-#define LIFE2	0x02  // 2^1 = 2 (second bit)
-#define LIFE3   0x04  // 2^2 = 4 (third bit)
+#define LIFE1	0x01  //
+#define LIFE2	0x02  //
+#define LIFE3   0x04  //
 
 #define GAME_END		0x01
 
@@ -268,6 +267,7 @@ I2C_HandleTypeDef hi2c1;
 SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim5;
+ADC_HandleTypeDef hadc1;
 
 
 void print_time(void);
@@ -279,6 +279,7 @@ static void MX_TIM2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_ADC1_Init(void);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) { TIMER2_HANDLE(); }
 
 void Delay_1_plus_us(void);
@@ -292,6 +293,7 @@ void updateLifeLEDs(int lives);
 void I2CSend(char, char);
 
 void resetHighScore(void);
+uint32_t get_adc_seed(void);
 
 int main(void) {
 	HAL_Init();
@@ -302,6 +304,7 @@ int main(void) {
     MX_SPI1_Init();
     MX_TIM5_Init();
     MX_I2C1_Init();
+    MX_ADC1_Init();
 
 	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start(&htim5);
@@ -357,6 +360,9 @@ int main(void) {
 
     // Initialize life LEDs based on starting lives
     updateLifeLEDs(lives);
+
+    // set random seed
+    srand(get_adc_seed());
 
     while (1) {
     	// check for game end condition
@@ -1006,6 +1012,14 @@ void updateLifeLEDs(int lives) {
 }
 
 
+uint32_t get_adc_seed() {
+    HAL_ADC_Start(&hadc1); // Start conversion
+    HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY); // Wait for conversion
+    uint32_t val = HAL_ADC_GetValue(&hadc1); // Read value
+    HAL_ADC_Stop(&hadc1);
+    return val;
+}
+
 
 /**
   * @brief System Clock Configuration
@@ -1057,12 +1071,80 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_MultiModeTypeDef multimode = {0};
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc1.Init.OversamplingMode = DISABLE;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure the ADC multi-mode
+  */
+  multimode.Mode = ADC_MODE_INDEPENDENT;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
   * @brief I2C1 Initialization Function
   * @param None
   * @retval None
   */
 static void MX_I2C1_Init(void)
 {
+
   /* USER CODE BEGIN I2C1_Init 0 */
 
   /* USER CODE END I2C1_Init 0 */
@@ -1071,7 +1153,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x10D19CE4;  // Standard mode (100 KHz)
+  hi2c1.Init.Timing = 0x10D19CE4;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
