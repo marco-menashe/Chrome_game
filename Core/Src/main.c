@@ -311,7 +311,6 @@ int main(void) {
 	highScoreString[3] = '\0';  // Ensure null termination
 
 	int highScore = atoi(highScoreString);
-//	uint32_t highScore = 0;
 	int currentScore = 0;
 
 
