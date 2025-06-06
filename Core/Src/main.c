@@ -1,4 +1,3 @@
-
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -70,13 +69,23 @@
 #define TOP_HALF_IDX	2
 static int lives = 2;
 
+//I2C
+#define IODIRA 0x00    // MCP23008 - I/O Direction Register
+#define IODIRB 0x01
+#define MCP_GPIOA 0x12 // MCP23008 - GPIO Register (to set output values)
+#define MCP_GPIOB 0x13
+
+char I2C_ADDRESS = 0x40;
+
+// Define life LED positions as bit masks, not just positions
+#define LIFE1	0x01  // 2^0 = 1 (first bit)
+#define LIFE2	0x02  // 2^1 = 2 (second bit)
+#define LIFE3   0x04  // 2^2 = 4 (third bit)
+
 #define GAME_END		0x01
 
 unsigned short flags = 0x00;
 uint8_t EE_Data[3];
-
-
-
 
 typedef struct {
     unsigned short sKeyRead;
@@ -255,10 +264,11 @@ char Txt[1];
 
 
 
-
-TIM_HandleTypeDef htim2;
+I2C_HandleTypeDef hi2c1;
 SPI_HandleTypeDef hspi1;
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim5;
+
 
 void print_time(void);
 void Keypadscan(void);
@@ -268,6 +278,7 @@ static void MX_GPIO_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM5_Init(void);
+static void MX_I2C1_Init(void);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) { TIMER2_HANDLE(); }
 
 void Delay_1_plus_us(void);
@@ -277,22 +288,20 @@ void EEPROM_READ_FUN(uint8_t EE_Addr);
 
 void updateCellsEnv(void);
 void updatePlayerPos(void);
+void updateLifeLEDs(int lives);
+void I2CSend(char, char);
 
-
+void resetHighScore(void);
 
 int main(void) {
-
-
-
-
 	HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_SET);
+    MX_GPIO_Init();
     MX_TIM2_Init();
     MX_SPI1_Init();
     MX_TIM5_Init();
-
+    MX_I2C1_Init();
 
 	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start(&htim5);
@@ -317,11 +326,25 @@ int main(void) {
     }
 
     LcdInit(); 				// LcdPutS("KeyPad LCD:");
-    LcdWriteCmd(0x000C);  	// CURSOR OFF
-
-    LcdCreateChar(FULL_IDX, full_rect);
+    LcdWriteCmd(0x000C);  	// CURSOR OFF    LcdCreateChar(FULL_IDX, full_rect);
     LcdCreateChar(TOP_HALF_IDX, top_half);
     LcdCreateChar(BOT_HALF_IDX, bottom_half);
+    LcdCreateChar(FULL_IDX, full_rect);
+
+    // Reset and initialize I2C interface
+    HAL_I2C_DeInit(&hi2c1);
+    HAL_Delay(10);
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK) {
+        // Display error message on LCD if I2C initialization failed
+        LcdGoto(0, 0);
+        LcdPutS("I2C Init Error");
+        HAL_Delay(1000); // Give time to read the message
+    }
+
+    // configure i2c
+    I2CSend(IODIRB, 0x00);      	// Make IO port_B, bit 0 to 7 all output
+    I2CSend(MCP_GPIOB, (LIFE1|LIFE2|LIFE3));
+
 
     char topbuff[17] = "";
     char bottombuff[17] = "";
@@ -329,25 +352,32 @@ int main(void) {
     char endMessage[17] = "--- Game Over --";
     char endScore[17];
 
-    if (highScore < 0 || highScore > 99999) highScore = 0;
+    if (highScore < 0 || highScore > 99999)
+    	highScore = 0;
+
+    // Initialize life LEDs based on starting lives
+    updateLifeLEDs(lives);
 
     while (1) {
     	// check for game end condition
     	if (flags & GAME_END) {
+    		if(highScore < currentScore){
+    		    char currentScoreString[11];
+    		    sprintf(currentScoreString, "%d", currentScore);
+    			EEPROM_SEND(0x0C,currentScoreString[0],currentScoreString[1]);					// Address at 0x0C is randomly chosen.
+    			EEPROM_SEND(0x0E,currentScoreString[2],currentScoreString[3]);
+    			EEPROM_SEND(0x010,currentScoreString[4],currentScoreString[5]);
+    			EEPROM_SEND(0x012,'\0','\0');
+    			highScore = currentScore;
+    		}
+
     		LcdClear();
     		LcdGoto(0, 0);
     		LcdPutS(endMessage);
     		LcdGoto(1, 0);
+    		snprintf(endScore, sizeof(endScore), "H: %d C: %d", highScore,  currentScore);
 			LcdPutS(endScore);
-			snprintf(endScore, sizeof(endScore), "H: %d C: %d", highScore, currentScore);
-    		if(highScore < currentScore){
-    			char currentScoreString[4];
-    			sprintf(currentScoreString, "%d", currentScore);
-				EEPROM_SEND(0x0C,currentScoreString[0],currentScoreString[1]);					// Address at 0x0C is randomly chosen.
-				EEPROM_SEND(0x0E,currentScoreString[2],currentScoreString[3]);
-				EEPROM_SEND(0x010,currentScoreString[4],currentScoreString[5]);
-				EEPROM_SEND(0x012,'\0','\0');
-    		}
+
     		return 0;
     	}
 
@@ -376,9 +406,10 @@ int main(void) {
         	{
                 // lose one life
                 lives--;
+                // Update the life LEDs
+                updateLifeLEDs(lives);
                 if (lives == 1) {
                     // first death -> turn OFF the second LED (PA3)
-                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
                 }
                 else if (lives <= 0) {
                     // no more lives -> game over
@@ -391,9 +422,10 @@ int main(void) {
         	} else if (character.row1Occupied && envCells[ROWLENGTH].environmentOccupied) {
                 // lose one life
                 lives--;
+                // Update the life LEDs
+                updateLifeLEDs(lives);
                 if (lives == 1) {
                     // first death -> turn OFF the second LED (PA3)
-                    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
                 }
                 else if (lives <= 0) {
                     // no more lives -> game over
@@ -462,12 +494,12 @@ void updatePlayerPos() {
 
 		switch (character.jumpFrame) {
 			case 0:
-				// we are now in takeoff (to give grave making bottom hitbox off)
+				// we are now in takeoff
 				character.jumpFrame += 1;
 				character.topState = TOP_HALF_IDX;
 				character.botState = BOT_HALF_IDX;
 				character.row0Occupied = true;
-				character.row1Occupied = false;
+				character.row1Occupied = true;
 				break;
 			case 1:
 				// we are now in flight
@@ -480,7 +512,7 @@ void updatePlayerPos() {
 			case 2:
 				// we are now in flight
 				character.jumpFrame += 1;
-				character.topState = FULL_IDX;
+				character.topState = BOT_HALF_IDX;
 				character.botState = (unsigned short)' ';
 				character.row0Occupied = true;
 				character.row1Occupied = false;
@@ -498,7 +530,7 @@ void updatePlayerPos() {
 				character.jumpFrame += 1;
 				character.topState = TOP_HALF_IDX;
 				character.botState = BOT_HALF_IDX;
-				character.row0Occupied = false;
+				character.row0Occupied = true;
 				character.row1Occupied = true;
 				break;
 			default:
@@ -891,7 +923,7 @@ void keyS() {
 
 }
 void keyP() {
-
+	resetHighScore();
 }
 
 
@@ -932,12 +964,53 @@ void keyPR() {
 
 }
 
+void resetHighScore(void) {
+	EEPROM_SEND(0xC, '0', '\0');
+	EEPROM_SEND(0xE, '0', '\0');
+	EEPROM_SEND(0x10, '0', '\0');
+	EEPROM_SEND(0x12, '0', '\0');
+}
+
+void I2CSend(char port, char data)
+{
+	uint8_t Buf[2];
+	HAL_StatusTypeDef status;
+
+	Buf[0] = port;
+	Buf[1] = data;
+
+	// Try to transmit - add error handling
+	status = HAL_I2C_Master_Transmit(&hi2c1, I2C_ADDRESS, Buf, 2, 1000);
+
+	// If there's an error, try re-initializing I2C and sending again
+	if (status != HAL_OK) {
+		HAL_I2C_DeInit(&hi2c1);
+		HAL_Delay(10);
+		HAL_I2C_Init(&hi2c1);
+		HAL_Delay(10);
+		HAL_I2C_Master_Transmit(&hi2c1, I2C_ADDRESS, Buf, 2, 1000);
+	}
+}
+
+// Function to update life LEDs
+void updateLifeLEDs(int lives) {
+    uint8_t led_status = 0;
+
+    // Set the appropriate bits based on number of lives
+    if (lives >= 1) led_status |= LIFE1;
+    if (lives >= 2) led_status |= LIFE2;
+    if (lives >= 3) led_status |= LIFE3;
+
+    // Send to the MCP23008
+    I2CSend(MCP_GPIOB, led_status);
+}
+
+
+
 /**
   * @brief System Clock Configuration
   * @retval None
   */
-
-
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -981,6 +1054,53 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x10D19CE4;  // Standard mode (100 KHz)
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -1131,12 +1251,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
+                          |GPIO_PIN_9, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|GPIO_PIN_8, GPIO_PIN_RESET);
+                          |GPIO_PIN_6, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PC0 PC1 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
@@ -1144,10 +1264,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA0 PA1 PA2 PA3
-                           PA4 PA8 PA9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_8|GPIO_PIN_9;
+  /*Configure GPIO pins : PA0 PA1 PA4 PA8
+                           PA9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
+                          |GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1160,9 +1280,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB10 PB3 PB4 PB5
-                           PB6 PB8 */
+                           PB6 */
   GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|GPIO_PIN_8;
+                          |GPIO_PIN_6;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

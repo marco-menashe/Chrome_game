@@ -15,7 +15,7 @@
 #define LCD_SCROLL_TIMER 		1
 #define SCORE_TIMER 			4
 
-#define SCORE_TIME				10
+#define SCORE_TIME				100
 #define LCD_SCROLL_TIME 		100
 #define KEY_SCAN_TIME 			10
 #define KEY_REPEAT_TIME 		333
